@@ -74,6 +74,52 @@
             <key>IOMatchCategory</key>
             <string>RTLBluetoothFirmware</string>
         </dict>
+        <key>RTLBluetoothFirmware_UB600</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.opendev.RTLBluetoothFirmware</string>
+
+            <key>IOClass</key>
+            <string>RTLBluetoothFirmware</string>
+
+            <key>IOProviderClass</key>
+            <string>IOUSBHostDevice</string>
+
+            <key>idVendor</key>
+            <integer>3034</integer>
+
+            <key>idProduct</key>
+            <integer>42792</integer>
+
+            <key>IOProbeScore</key>
+            <integer>4000</integer>
+
+            <key>IOMatchCategory</key>
+            <string>RTLBluetoothFirmware</string>
+        </dict>
+        <key>RTLBluetoothFirmware_8761B</key>
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.opendev.RTLBluetoothFirmware</string>
+
+            <key>IOClass</key>
+            <string>RTLBluetoothFirmware</string>
+
+            <key>IOProviderClass</key>
+            <string>IOUSBHostDevice</string>
+
+            <key>idVendor</key>
+            <integer>3034</integer>
+
+            <key>idProduct</key>
+            <integer>34673</integer>
+
+            <key>IOProbeScore</key>
+            <integer>4000</integer>
+
+            <key>IOMatchCategory</key>
+            <string>RTLBluetoothFirmware</string>
+        </dict>
     </dict>
 </dict>
 </plist>

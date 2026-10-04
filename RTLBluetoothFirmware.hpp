@@ -22,6 +22,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOCommandGate.h>
+#include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/usb/IOUSBHostDevice.h>
 #include <IOKit/usb/IOUSBHostInterface.h>
@@ -86,6 +87,10 @@ public:
     void    stop(IOService *provider)   override;
     void    free()                      override;
 
+    IOReturn setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) override;
+    unsigned long maxCapabilityForDomainState(IOPMPowerFlags domainState) override;
+    unsigned long initialPowerStateForDomainState(IOPMPowerFlags domainState) override;
+
 private:
     IOUSBHostDevice          *m_device     = nullptr;
     IOUSBHostInterface       *m_interface  = nullptr;
@@ -94,12 +99,25 @@ private:
     bool                      m_evtBufPrepared = false;
     uint32_t                  m_evtMaxPacket   = 16;
 
+    enum class ChipVariant {
+        Unknown,
+        RTL8761BU,
+        RTL8761B
+    };
+    ChipVariant               m_chipVariant = ChipVariant::Unknown;
+
     // Event-read synchronization (async io + commandSleep)
     IOWorkLoop               *m_workLoop   = nullptr;
     IOCommandGate            *m_cmdGate    = nullptr;
     bool                      m_evtInFlight = false;   // gated sleep token
     IOReturn                  m_evtStatus   = kIOReturnSuccess;
     uint32_t                  m_evtActualLen = 0;
+
+    // Power management reload timer
+    IOTimerEventSource       *m_pmTimer    = nullptr;
+    uint32_t                  m_powerState = 0;
+    static void pmTimerCallback(OSObject *owner, IOTimerEventSource *sender);
+    void        handleWake();
 
     // ── High-level flow ──────────────────────────────────────────────────────
     IOReturn    runFirmwareUpload();

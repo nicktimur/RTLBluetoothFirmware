@@ -2,8 +2,8 @@
 
 Realtek RTL8761B / RTL8761BU Bluetooth firmware loader for macOS (OpenCore Hackintosh).
 
-Makes the TP-Link UB500 (and other RTL8761BU USB dongles) work as a real
-Bluetooth controller on macOS 12–26 by uploading the Realtek firmware at boot —
+Makes the TP-Link UB500, UB600, and other RTL8761B/RTL8761BU USB dongles work as a real
+Bluetooth controller on macOS 12–26 by uploading the Realtek firmware at boot and wake —
 the same approach Linux's `btrtl` driver uses, reimplemented as an IOKit kext.
 
 The RTL8761BU ships with no firmware. Linux uploads `rtl8761bu_fw.bin` via HCI
@@ -27,6 +27,7 @@ Confirmed on macOS 26 (Tahoe), OpenCore 1.0.7, Intel: phone and audio
 | Audio (A2DP / HFP / AVRCP) and battery | Works |
 | HID (mice, keyboards) | Works |
 | Discovering brand-new devices | Limited. macOS runs only a short inquiry on this chip, so put a device in pairing mode and select it promptly. Already-paired devices reconnect fine. |
+| Sleep/Wake (Power Management) | Works. Firmware is automatically re-uploaded asynchronously on wake. |
 | Apple Continuity (Handoff, AirDrop, Universal Clipboard) | Not supported. Requires genuine Apple Bluetooth/Wi-Fi hardware. |
 
 ## Download
@@ -40,8 +41,8 @@ Bluetooth with no kext at all, a CSR8510 dongle works natively on macOS. See
 
 ## Hardware
 
-This kext supports the Realtek **RTL8761BU** only (USB `0x2357 / 0x0604`). Other
-chips need a different driver or none at all; other RTL8761BU dongles can work by
+This kext supports the Realtek **RTL8761BU** and **RTL8761B** chipsets (e.g., USB `0x2357 / 0x0604` and `0x0bda / 0xa728`). Other
+chips need a different driver or none at all; other RTL8761B(U) dongles can work by
 adding their VID/PID to `Info.plist`.
 
 ### Recommended
@@ -49,6 +50,8 @@ adding their VID/PID to `Info.plist`.
 | Adapter | Chip | macOS support | Link |
 |---|---|---|---|
 | TP-Link UB500 | RTL8761BU | this kext | [Amazon](https://www.amazon.com/dp/B09DMP6T22?tag=bennzo-20) |
+| TP-Link UB600 | RTL8761B (0bda:a728) | this kext | [Amazon](https://www.amazon.com/dp/B0GVPZ4P6B?tag=bennzo-20) |
+| ARVOX BT 5.4 | RTL8761B (0bda:a728) | this kext | [Amazon](https://www.amazon.in/dp/B0FRN4Q8F7) |
 | CSR8510 A10 dongle | CSR8510 | native, no kext | [Amazon](https://www.amazon.com/s?k=csr8510+a10+bluetooth&tag=bennzo-20) |
 | Broadcom BCM20702 dongle | BCM20702 | BrcmPatchRAM3 | [Amazon](https://www.amazon.com/s?k=BCM20702+USB+Bluetooth&tag=bennzo-20) |
 
@@ -60,7 +63,6 @@ relying on it.
 
 Different or newer chips, or Wi-Fi + Bluetooth combos:
 UB500 Plus ([B0DKFXGR21](https://www.amazon.com/dp/B0DKFXGR21?tag=bennzo-20)),
-UB600 ([B0GVPZ4P6B](https://www.amazon.com/dp/B0GVPZ4P6B?tag=bennzo-20)),
 UB400 ([B07V1SZCY6](https://www.amazon.com/dp/B07V1SZCY6?tag=bennzo-20)),
 Archer T2UB ([B0BJ7XJ27X](https://www.amazon.com/dp/B0BJ7XJ27X?tag=bennzo-20)),
 Archer TX10UB ([B0F9CNQN42](https://www.amazon.com/dp/B0F9CNQN42?tag=bennzo-20)).
@@ -83,7 +85,7 @@ helps if a rear USB-2 port is awkward to reach.
 ## Build
 
 ```sh
-git clone https://github.com/<you>/RTLBluetoothFirmware.git
+git clone https://github.com/gajjartejas/RTLBluetoothFirmware.git
 cd RTLBluetoothFirmware
 make
 ```
@@ -149,8 +151,6 @@ identity `0x8761 / 0x000B` (it becomes the patch version, e.g. `0xDFC6D922`).
 ## Known limitations
 
 - **Discovering new devices** is finicky (see table). Paired devices reconnect fine.
-- **Sleep/wake**: if USB power is cut, the volatile firmware is lost — replug or
-  reboot re-patches it.
 - **Continuity** features need real Apple hardware; not fixable here.
 
 ## Credits
