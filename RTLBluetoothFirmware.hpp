@@ -116,6 +116,15 @@ private:
     // Power management reload timer
     IOTimerEventSource       *m_pmTimer    = nullptr;
     uint32_t                  m_powerState = 0;
+    bool                      m_inWake     = false;   // wake re-check: never disturb a live controller
+    uint32_t                  m_wakeCount  = 0;
+
+    // Boot-time retry after a failed upload (shares m_pmTimer with wake)
+    bool                      m_retryPending = false;
+    uint32_t                  m_retryCount   = 0;
+    bool                      m_ifaceBusy    = false; // HCI interface exists but someone else holds it
+    void        scheduleRetry();
+    void        handleRetry();
     static void pmTimerCallback(OSObject *owner, IOTimerEventSource *sender);
     void        handleWake();
 

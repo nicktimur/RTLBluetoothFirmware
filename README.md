@@ -119,7 +119,23 @@ Result: `RTLBluetoothFirmware.kext`.
    `7C436110-AB2A-4BBB-A880-FE41995C9F82`:
    `bluetoothExternalDongleFailed`, `bluetoothInternalControllerInfo`,
    `bluetoothHostControllerSwitchBehavior`.
-5. Reboot **with the dongle plugged in** (a USB-2 port is ideal).
+5. **Tell macOS to use the external dongle.** Add this to
+   `config.plist → NVRAM → Add` under the same GUID
+   `7C436110-AB2A-4BBB-A880-FE41995C9F82`:
+
+   | Key | Type | Value |
+   |---|---|---|
+   | `bluetoothHostControllerSwitchBehavior` | String | `always` |
+
+   Keep the `Delete` entry from step 4 as well: OpenCore deletes the key first
+   and then writes the value from `Add`, so the setting is re-applied on every boot.
+
+   This is **required on SMBIOS models whose real Mac has built-in Bluetooth**
+   (confirmed on a laptop using `MacBookPro14,2`). Without it, `bluetoothd`
+   assumes the internal controller is present, ignores the dongle even though
+   the firmware upload succeeded, and falls back to a non-existent internal
+   Broadcom controller (see [Troubleshooting](#troubleshooting)).
+6. Reboot **with the dongle plugged in** (a USB-2 port is ideal).
 
 The `scripts/` helpers automate install + verification — read them before running;
 they touch your EFI.
@@ -147,6 +163,39 @@ identity `0x8761 / 0x000B` (it becomes the patch version, e.g. `0xDFC6D922`).
 5. Uploads it in 252-byte fragments via `0xFC20`, then `HCI Reset`.
 6. Closes all USB handles and releases the device — `bluetoothd` (via BlueToolFixup)
    then drives it as a standard USB HCI controller.
+
+## Troubleshooting
+
+### Firmware uploads, but Bluetooth stays off (`BCM_4350C2`, `Address: NULL`)
+
+`system_profiler SPBluetoothDataType` shows `Chipset: BCM_4350C2`,
+`Address: NULL`, `State: Off` even though the firmware upload succeeded, and
+the `bluetoothd` log contains:
+
+```
+External Bluetooth dongle was not found -- setting chipset to default BCM_4350C2
+UART open(/dev/cu.BLTH) port failed to appear after 15 seconds
+```
+
+`bluetoothd` is ignoring the dongle and looking for an internal controller.
+Add the `bluetoothHostControllerSwitchBehavior = always` NVRAM entry
+(install step 5) and reboot. When it works, the controller reports
+`Chip THIRD_PARTY_DONGLE` with the dongle's real address.
+
+Check the log with:
+
+```sh
+log show --last boot --predicate 'process == "bluetoothd"' | grep -iE "dongle|THIRD_PARTY|transport"
+```
+
+### Do not rename the device to "Bluetooth USB Host Controller"
+
+Some guides rename third-party USB Bluetooth devices to this name (the Intel
+firmware kext does it). For this dongle it makes `bluetoothd` treat it as
+Apple's *internal* Broadcom controller and send Broadcom-only vendor commands,
+which fail (`VSC Read Verbose Config Version Info failed STATUS 718`,
+`HCI initialization failed`). `bluetoothd` then restarts in a loop and
+`system_profiler SPBluetoothDataType` hangs while the dongle is plugged in.
 
 ## Known limitations
 

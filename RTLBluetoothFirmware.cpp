@@ -34,6 +34,7 @@ bool RTLBluetoothFirmware::start(IOService *provider)
     m_workLoop = IOWorkLoop::workLoop();
     if (!m_workLoop) {
         IOLog(DRV ": failed to create work loop\n");
+        super::stop(provider);
         return false;
     }
 
@@ -68,8 +69,8 @@ bool RTLBluetoothFirmware::start(IOService *provider)
         setProperty("RTL-Status", "FAILED");
         setProperty("RTL-error", (unsigned long long)ret, 32);
         provider->setProperty("RTL-error", (unsigned long long)ret, 32);
-        // We do not stop() here; if we fail, we still want to be in PM
-        // so that we can try again on wake from sleep!
+        // We do not stop() here: stay in PM and retry shortly (and on wake).
+        scheduleRetry();
     } else {
         /*
          * Success: all USB handles are closed, so userspace (bluetoothd /
@@ -126,6 +127,7 @@ IOReturn RTLBluetoothFirmware::setPowerState(unsigned long powerStateOrdinal, IO
         // Going to sleep
         IOLog(DRV ": PM going to sleep (state 0)\n");
         m_powerState = 0;
+        m_retryPending = false;          // wake handler takes over after sleep
         if (m_pmTimer)
             m_pmTimer->cancelTimeout();
     } else {
@@ -146,31 +148,111 @@ IOReturn RTLBluetoothFirmware::setPowerState(unsigned long powerStateOrdinal, IO
 void RTLBluetoothFirmware::pmTimerCallback(OSObject *owner, IOTimerEventSource *sender)
 {
     RTLBluetoothFirmware *self = OSDynamicCast(RTLBluetoothFirmware, owner);
-    if (self)
+    if (!self)
+        return;
+    if (self->m_retryPending)
+        self->handleRetry();
+    else
         self->handleWake();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boot-time retry
+//
+// A failed upload at boot is usually a USB timing hiccup (the device is still
+// settling, or another driver probed it first). Retry a few times with growing
+// delays. bluetoothd starts ~15-20 s after this kext, so the retries normally
+// run before it claims the device; if it already holds the HCI interface we
+// back off instead of tearing its configuration down.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static const uint32_t kRetryDelaysMs[] = { 2000, 5000, 10000 };
+static const uint32_t kMaxRetries = sizeof(kRetryDelaysMs) / sizeof(kRetryDelaysMs[0]);
+
+void RTLBluetoothFirmware::scheduleRetry()
+{
+    if (!m_pmTimer || m_retryCount >= kMaxRetries) {
+        setProperty("RTL-retry", "giving up (no more retries)");
+        m_retryPending = false;
+        return;
+    }
+    uint32_t delay = kRetryDelaysMs[m_retryCount];
+    m_retryPending = true;
+    m_pmTimer->setTimeoutMS(delay);
+    IOLog(DRV ": scheduling retry %u/%u in %u ms\n", m_retryCount + 1, kMaxRetries, delay);
+}
+
+void RTLBluetoothFirmware::handleRetry()
+{
+    m_retryPending = false;
+    m_retryCount++;
+    setProperty("RTL-retry_count", (unsigned long long)m_retryCount, 32);
+
+    IOService *provider = getProvider();
+    if (!provider)
+        return;
+
+    IOReturn ret = openUSB(provider);
+    if (ret == kIOReturnSuccess)
+        ret = runFirmwareUpload();
+    closeUSB();
+
+    if (ret == kIOReturnSuccess) {
+        removeProperty("RTL-error");
+        if (IOService *p = getProvider()) p->removeProperty("RTL-error");
+        setProperty("RTL-retry", "succeeded");
+        IOLog(DRV ": retry %u succeeded\n", m_retryCount);
+    } else if (ret == kIOReturnExclusiveAccess) {
+        // Someone (bluetoothd) owns the device now — do not fight it.
+        setProperty("RTL-retry", "stopped: device in use by Bluetooth stack");
+        IOLog(DRV ": retry %u: device in use, stopping\n", m_retryCount);
+    } else {
+        setProperty("RTL-Status", "FAILED");
+        setProperty("RTL-error", (unsigned long long)ret, 32);
+        IOLog(DRV ": retry %u failed: 0x%08X\n", m_retryCount, ret);
+        scheduleRetry();
+    }
 }
 
 void RTLBluetoothFirmware::handleWake()
 {
-    IOLog(DRV ": running firmware upload on wake\n");
+    IOLog(DRV ": wake — checking whether firmware survived\n");
     IOService *provider = getProvider();
     if (!provider) return;
 
+    /*
+     * Wake-safe mode. If USB power was cut, the dongle re-enumerates as a new
+     * IOUSBHostDevice and a fresh instance of this driver uploads firmware in
+     * start(). This path only covers the case where the same device object
+     * survives. Then bluetoothd usually owns the HCI interface and the patch
+     * is still in RAM, so we must not reconfigure, reset (0xFC66) or re-upload
+     * a live controller. We only act if the chip is genuinely back in ROM mode.
+     */
+    m_wakeCount++;
+    setProperty("RTL-wake_count", (unsigned long long)m_wakeCount, 32);
+    m_inWake = true;
+
+    const char *result;
     IOReturn ret = openUSB(provider);
-    if (ret == kIOReturnSuccess) {
+    if (ret == kIOReturnExclusiveAccess) {
+        result = "skipped: device in use by Bluetooth stack";
+        ret = kIOReturnSuccess;
+    } else if (ret == kIOReturnSuccess) {
         ret = runFirmwareUpload();
+        OSString *st = OSDynamicCast(OSString, getProperty("RTL-Status"));
+        result = (ret == kIOReturnSuccess)
+                 ? (st ? st->getCStringNoCopy() : "ok")
+                 : "re-upload FAILED";
+    } else {
+        result = "could not open device";
     }
     closeUSB();
+    m_inWake = false;
 
-    if (ret == kIOReturnSuccess) {
-        if (!getProperty("RTL-Status"))
-            setProperty("RTL-Status", "firmware uploaded");
-        IOLog(DRV ": wake firmware reload complete\n");
-    } else {
-        setProperty("RTL-Status", "wake reload FAILED");
+    setProperty("RTL-last_wake", result);
+    if (ret != kIOReturnSuccess)
         setProperty("RTL-error", (unsigned long long)ret, 32);
-        IOLog(DRV ": wake firmware reload FAILED: 0x%08X\n", ret);
-    }
+    IOLog(DRV ": wake result: %s (0x%08X)\n", result, ret);
 }
 
 bool RTLBluetoothFirmware::isRomMode(const RtlLocalVersion &v) const
@@ -219,8 +301,15 @@ IOReturn RTLBluetoothFirmware::runFirmwareUpload()
      * "drop firmware" command (0xFC66, no completion event), wait, and
      * re-read until the chip is back in ROM mode.
      */
+    if (!isRomMode(ver) && m_inWake) {
+        // Patch survived sleep: the controller is live, leave it alone.
+        repS("RTL-Status", "wake: firmware still active, nothing to do");
+        return kIOReturnSuccess;
+    }
+
     if (!isRomMode(ver)) {
         IOLog(DRV ": not in ROM mode — sending vendor reset (0xFC66)\n");
+        repS("RTL-boot_path", "warm: chip was patched, vendor reset sent");
         hciCmd(RTL_OP_DROP_FW, nullptr, 0);
         IOSleep(300);
 
@@ -249,6 +338,9 @@ IOReturn RTLBluetoothFirmware::runFirmwareUpload()
             return kIOReturnSuccess;
         }
     }
+
+    if (!getProperty("RTL-boot_path"))
+        repS("RTL-boot_path", "cold: chip was in ROM mode");
 
     uint8_t romVersion = 0;
     ret = rtlReadRomVersion(&romVersion);
@@ -341,10 +433,14 @@ IOReturn RTLBluetoothFirmware::openUSB(IOService *provider)
      * soon as the first scan comes up empty, then wait for the
      * IOUSBHostInterface nubs to publish.
      */
-    for (int attempt = 0; attempt < 24 && !m_interface; attempt++) {
+    const int maxAttempts = m_inWake ? 4 : 24;
+    m_ifaceBusy = false;
+    for (int attempt = 0; attempt < maxAttempts && !m_interface; attempt++) {
         if (findHCIInterface())
             break;
-        if (attempt == 0) {
+        if (m_ifaceBusy)                   // interface exists but is held: stop, don't reconfigure
+            break;
+        if (attempt == 0 && !m_inWake) {   // never tear down a live configuration on wake
             IOLog(DRV ": no interface nubs — setting configuration 1\n");
             IOReturn cfgRet = m_device->setConfiguration(1, true);
             if (cfgRet != kIOReturnSuccess)
@@ -354,10 +450,11 @@ IOReturn RTLBluetoothFirmware::openUSB(IOService *provider)
     }
 
     if (!m_interface) {
-        IOLog(DRV ": HCI interface (class E0/01/01) not found\n");
+        IOLog(DRV ": HCI interface (class E0/01/01) not available\n");
         m_device->close(this);
         m_device = nullptr;
-        return kIOReturnNotFound;
+        // The interface exists but is held (normally by bluetoothd).
+        return (m_ifaceBusy || m_inWake) ? kIOReturnExclusiveAccess : kIOReturnNotFound;
     }
 
     if (!findInterruptInPipe()) {
@@ -418,7 +515,8 @@ bool RTLBluetoothFirmware::findHCIInterface()
                 iface->retain();
                 m_interface = iface;
             } else {
-                IOLog(DRV ": HCI interface found but open failed\n");
+                IOLog(DRV ": HCI interface found but open failed (busy)\n");
+                m_ifaceBusy = true;
             }
             break;
         }
