@@ -25,7 +25,7 @@ OSDefineMetaClassAndStructors(RTLBluetoothFirmware, IOService)
 
 bool RTLBluetoothFirmware::start(IOService *provider)
 {
-    IOLog(DRV ": start — TP-Link UB500 (RTL8761BU) firmware loader v1.3\n");
+    IOLog(DRV ": start — TP-Link UB500 (RTL8761BU) firmware loader v1.3.1\n");
 
     {
         char dummy[8] = {};
@@ -73,8 +73,7 @@ bool RTLBluetoothFirmware::start(IOService *provider)
     if (ret != kIOReturnSuccess) {
         IOLog(DRV ": firmware upload FAILED: 0x%08X\n", ret);
         setProperty("RTL-Status", "FAILED");
-        setProperty("RTL-error", (unsigned long long)ret, 32);
-        provider->setProperty("RTL-error", (unsigned long long)ret, 32);
+        setError(ret);
         // We do not stop() here: stay in PM and retry shortly (and on wake).
         scheduleRetry();
     } else {
@@ -92,6 +91,13 @@ bool RTLBluetoothFirmware::start(IOService *provider)
     setProperty("RTL-wake_policy", m_wakeSafe ? "safe (-rtlwakesafe)" : "reload");
     registerService();
     return true;
+}
+
+void RTLBluetoothFirmware::setError(IOReturn ret)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "0x%08X", (uint32_t)ret);
+    setProperty("RTL-error", buf);
 }
 
 void RTLBluetoothFirmware::stop(IOService *provider)
@@ -206,7 +212,6 @@ void RTLBluetoothFirmware::handleRetry()
 
     if (ret == kIOReturnSuccess) {
         removeProperty("RTL-error");
-        if (IOService *p = getProvider()) p->removeProperty("RTL-error");
         setProperty("RTL-retry", "succeeded");
         IOLog(DRV ": retry %u succeeded\n", m_retryCount);
     } else if (ret == kIOReturnExclusiveAccess) {
@@ -215,7 +220,7 @@ void RTLBluetoothFirmware::handleRetry()
         IOLog(DRV ": retry %u: device in use, stopping\n", m_retryCount);
     } else {
         setProperty("RTL-Status", "FAILED");
-        setProperty("RTL-error", (unsigned long long)ret, 32);
+        setError(ret);
         IOLog(DRV ": retry %u failed: 0x%08X\n", m_retryCount, ret);
         scheduleRetry();
     }
@@ -232,31 +237,43 @@ void RTLBluetoothFirmware::handleWake()
 }
 
 /*
- * Default wake policy (same effect as the original 1.2 driver, made explicit).
+ * Default wake policy (same path as the original 1.2 driver).
  *
- * Reclaim the HCI interface from the Bluetooth stack (re-setting the USB
- * configuration if it is held), drop the patch with 0xFC66 and upload the
- * firmware again. bluetoothd sees the controller go away and come back and
- * re-initialises it from scratch, which is what this chip needs after sleep.
+ * Try to open the device and, if the HCI interface is held, re-set the USB
+ * configuration, drop the patch (0xFC66) and upload the firmware again.
+ *
+ * In practice, after a normal sleep the Bluetooth stack keeps the USB device
+ * open, so the very first open() fails (0xE00002C5) and nothing is touched;
+ * the patch stays live. 1.2 behaved the same but only logged "FAILED".
+ * If the dongle lost power it re-enumerates and start() uploads instead.
  */
 void RTLBluetoothFirmware::wakeReload()
 {
-    IOLog(DRV ": wake — reloading firmware (fresh controller)\n");
+    IOLog(DRV ": wake — trying firmware reload\n");
     IOService *provider = getProvider();
     if (!provider) return;
 
     m_inWake       = false;
     m_forceReclaim = true;
     IOReturn ret = openUSB(provider);
-    if (ret == kIOReturnSuccess)
+    const char *result;
+    if (ret == kIOReturnExclusiveAccess) {
+        // The Bluetooth stack holds the USB device open (normal after sleep
+        // when power was kept): nothing to reclaim, the patch is still live.
+        result = "skipped: device held by Bluetooth stack";
+        ret = kIOReturnSuccess;
+    } else if (ret == kIOReturnSuccess) {
         ret = runFirmwareUpload();
+        result = (ret == kIOReturnSuccess) ? "reloaded" : "reload FAILED";
+    } else {
+        result = "could not open device";
+    }
     closeUSB();
     m_forceReclaim = false;
 
-    const char *result = (ret == kIOReturnSuccess) ? "reloaded" : "reload FAILED";
     setProperty("RTL-last_wake", result);
     if (ret != kIOReturnSuccess)
-        setProperty("RTL-error", (unsigned long long)ret, 32);
+        setError(ret);
     else
         removeProperty("RTL-error");
     IOLog(DRV ": wake result: %s (0x%08X)\n", result, ret);
@@ -293,7 +310,7 @@ void RTLBluetoothFirmware::wakeSafeCheck()
 
     setProperty("RTL-last_wake", result);
     if (ret != kIOReturnSuccess)
-        setProperty("RTL-error", (unsigned long long)ret, 32);
+        setError(ret);
     IOLog(DRV ": wake result: %s (0x%08X)\n", result, ret);
 }
 
@@ -313,21 +330,17 @@ IOReturn RTLBluetoothFirmware::runFirmwareUpload()
     IOReturn        ret;
     RtlLocalVersion ver = {};
 
-    auto repN = [this](const char *k, unsigned long long v) {
-        setProperty(k, v, 32);
-        if (IOService *p = getProvider()) p->setProperty(k, v, 32);
-    };
-    auto repS = [this](const char *k, const char *v) {
-        setProperty(k, v);
-        if (IOService *p = getProvider()) p->setProperty(k, v);
-    };
+    // Diagnostics go on our own registry entry only (never on the USB device
+    // node the Bluetooth stack matches against).
+    auto repN = [this](const char *k, unsigned long long v) { setProperty(k, v, 32); };
+    auto repS = [this](const char *k, const char *v)        { setProperty(k, v); };
     removeProperty("RTL-Status");
     repS("RTL-step", "read local version");
 
     ret = readLocalVersion(&ver);
     if (ret != kIOReturnSuccess) {
         IOLog(DRV ": HCI Read Local Version failed: 0x%08X\n", ret);
-        repN("RTL-error", ret);
+        setError(ret);
         return ret;
     }
     repN("RTL-hci_ver", ver.hciVer);
@@ -388,7 +401,7 @@ IOReturn RTLBluetoothFirmware::runFirmwareUpload()
     ret = rtlReadRomVersion(&romVersion);
     if (ret != kIOReturnSuccess) {
         IOLog(DRV ": read ROM version failed: 0x%08X\n", ret);
-        repN("RTL-error", ret);
+        setError(ret);
         return ret;
     }
     repN("RTL-rom_version", romVersion);
@@ -400,7 +413,7 @@ IOReturn RTLBluetoothFirmware::runFirmwareUpload()
     uint32_t  imageLen = 0;
     ret = buildDownloadImage(romVersion, &image, &imageLen);
     if (ret != kIOReturnSuccess) {
-        repN("RTL-error", ret);
+        setError(ret);
         repS("RTL-step", "buildDownloadImage failed");
         return ret;
     }
@@ -411,7 +424,7 @@ IOReturn RTLBluetoothFirmware::runFirmwareUpload()
     ret = rtlDownload(image, imageLen);
     IOFree(image, imageLen);
     if (ret != kIOReturnSuccess) {
-        repN("RTL-error", ret);
+        setError(ret);
         repS("RTL-step", "rtlDownload failed");
         return ret;
     }
@@ -423,6 +436,11 @@ IOReturn RTLBluetoothFirmware::runFirmwareUpload()
     if (ret == kIOReturnSuccess) {
         repN("RTL-post_hci_rev", ver.hciRev);
         repN("RTL-post_lmp_subver", ver.lmpSubver);
+        {
+            char fwv[16];
+            snprintf(fwv, sizeof(fwv), "0x%04x%04x", ver.hciRev, ver.lmpSubver);
+            repS("RTL-fw_version", fwv);
+        }
         repS("RTL-Status", isRomMode(ver) ? "download done but chip still reports ROM version"
                                           : "firmware uploaded, patch active");
         IOLog(DRV ": post-download fw version 0x%04X%04X\n",
@@ -430,7 +448,7 @@ IOReturn RTLBluetoothFirmware::runFirmwareUpload()
         if (isRomMode(ver))
             IOLog(DRV ": WARNING — version unchanged, patch may not be active\n");
     } else {
-        repN("RTL-post_read_err", ret);
+        repN("RTL-post_read_err", (uint32_t)ret);
         repS("RTL-Status", "download done, post-read failed");
         IOLog(DRV ": post-download version read failed: 0x%08X "
               "(fragments all ACKed, continuing)\n", ret);

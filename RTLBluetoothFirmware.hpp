@@ -119,15 +119,14 @@ private:
     bool                      m_inWake     = false;   // wake-safe re-check: never disturb a live controller
     uint32_t                  m_wakeCount  = 0;
 
-    // Wake policy. Default (1.2 behaviour): on wake, reclaim the dongle and
-    // reload the firmware so the Bluetooth stack always gets a fresh
-    // controller. The RTL8761BU does not reliably come back from a long
-    // sleep with its patch state intact (AirPods A2DP gets suspended by the
-    // accessory a few seconds after start). Boot-arg -rtlwakesafe restores
-    // the "leave a live controller alone" behaviour for experiments.
+    // Wake policy. Default follows the 1.2 code path (try to reclaim and
+    // reload); when the Bluetooth stack holds the USB device — the normal case
+    // after sleep — it is skipped and reported as such. Boot-arg -rtlwakesafe
+    // selects the fork's "leave a live controller alone" check instead.
     bool                      m_wakeSafe     = false;
     bool                      m_forceReclaim = false; // wake reload: take the interface even if held
     void        wakeReload();
+    void        setError(IOReturn ret);    // RTL-error as "0xE00002C5" on our own node
     void        wakeSafeCheck();
 
     // Boot-time retry after a failed upload (shares m_pmTimer with wake)
